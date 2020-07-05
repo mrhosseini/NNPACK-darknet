@@ -257,12 +257,24 @@ int main(int argc, char** argv) {
 	printf("Input channels: %zu\n", input_channels);
 	printf("Output channels: %zu\n", output_channels);
 
-	const size_t cache_size = 128 * 1024 * 1024;
+	#ifdef __ANDROID__
+		const size_t cache_size = 4 * 1024 * 1024;
+	#else
+		const size_t cache_size = 128 * 1024 * 1024;
+	#endif
 	void* memory = NULL;
-	if (posix_memalign(&memory, 64, cache_size) != 0) {
-		fprintf(stderr, "Error: failed to allocate memory for cache flushing buffer\n");
-		exit(EXIT_FAILURE);
-	}
+	#if defined(__ANDROID__)
+		memory = memalign(64, cache_size);
+		if (memory == NULL) {
+			fprintf(stderr, "Error: failed to allocate memory for cache flushing buffer\n");
+			exit(EXIT_FAILURE);
+		}
+	#else
+		if (posix_memalign(&memory, 64, cache_size) != 0) {
+			fprintf(stderr, "Error: failed to allocate memory for cache flushing buffer\n");
+			exit(EXIT_FAILURE);
+		}
+	#endif
 
 	void* input = malloc(batch_size * input_channels * sizeof(float));
 	void* kernel = malloc(input_channels * output_channels * sizeof(float));

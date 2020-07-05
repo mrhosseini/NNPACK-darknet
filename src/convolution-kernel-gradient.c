@@ -318,11 +318,12 @@ static enum nnp_status compute_fast_convolution_kernel_gradient(
 					.input_transform = input_transform,
 					.transform_function = input_transform_function,
 				};
-				pthreadpool_compute_2d_tiled(threadpool,
-					(pthreadpool_function_2d_tiled_t) compute_input_transform,
+				pthreadpool_parallelize_2d_tile_2d(threadpool,
+					(pthreadpool_task_2d_tile_2d_t) compute_input_transform,
 					&input_transform_context,
 					batch_block_size, input_channels,
-					1,                input_channels_subblock_max);
+					1,                input_channels_subblock_max,
+					PTHREADPOOL_FLAG_DISABLE_DENORMALS);
 				NNP_INPUT_TRANSFORM_END(profile)
 
 				/* Grad output transform */
@@ -339,11 +340,12 @@ static enum nnp_status compute_fast_convolution_kernel_gradient(
 					.grad_output_transform = grad_output_transform,
 					.transform_function = grad_output_transform_function,
 				};
-				pthreadpool_compute_2d_tiled(threadpool,
-					(pthreadpool_function_2d_tiled_t) compute_grad_output_transform,
+				pthreadpool_parallelize_2d_tile_2d(threadpool,
+					(pthreadpool_task_2d_tile_2d_t) compute_grad_output_transform,
 					&grad_output_transform_context,
 					batch_block_size, output_channels,
-					1,                output_channels_subblock_max);
+					1,                output_channels_subblock_max,
+					PTHREADPOOL_FLAG_DISABLE_DENORMALS);
 				NNP_OUTPUT_TRANSFORM_END(profile)
 
 				NNP_BLOCK_MULTIPLICATION_START(profile)
@@ -376,11 +378,12 @@ static enum nnp_status compute_fast_convolution_kernel_gradient(
 							matrix_multiplication_context.fast_gemm = nnp_hwinfo.cxgemm.cX_conjb_transc_only_mr_x_nr;
 							matrix_multiplication_context.full_gemm = nnp_hwinfo.cxgemm.cX_conjb_transc_upto_mr_x_nr;
 						}
-						pthreadpool_compute_2d_tiled(threadpool,
-							(pthreadpool_function_2d_tiled_t) compute_matrix_multiplication,
+						pthreadpool_parallelize_2d_tile_2d(threadpool,
+							(pthreadpool_task_2d_tile_2d_t) compute_matrix_multiplication,
 							&matrix_multiplication_context,
 							output_channels,           input_channels_block_size,
-							output_channels_block_max, input_channels_subblock_max);
+							output_channels_block_max, input_channels_subblock_max,
+							PTHREADPOOL_FLAG_DISABLE_DENORMALS);
 					}
 				}
 				NNP_BLOCK_MULTIPLICATION_END(profile)
@@ -401,11 +404,12 @@ static enum nnp_status compute_fast_convolution_kernel_gradient(
 		.grad_kernel_transform = grad_kernel_transform,
 		.transform_function = grad_kernel_transform_function,
 	};
-	pthreadpool_compute_2d_tiled(threadpool,
-		(pthreadpool_function_2d_tiled_t) compute_grad_kernel_transform,
+	pthreadpool_parallelize_2d_tile_2d(threadpool,
+		(pthreadpool_task_2d_tile_2d_t) compute_grad_kernel_transform,
 		&grad_kernel_transform_context,
 		output_channels, input_channels,
-		1,               input_channels_subblock_max);
+		1,               input_channels_subblock_max,
+		PTHREADPOOL_FLAG_DISABLE_DENORMALS);
 	NNP_KERNEL_TRANSFORM_END(profile)
 
 	if (memory_block != workspace_buffer) {
@@ -497,10 +501,15 @@ enum nnp_status nnp_convolution_kernel_gradient(
 			tile_size = (struct nnp_size) { .height = 16, .width = 16 };
 			break;
 		case nnp_convolution_algorithm_wt8x8:
+		case nnp_convolution_algorithm_wt8x8_fp16:
 			/*
 			 * Winograd transform is not supported for this operation:
 			 * it needs F(5x5, 4x4) transform and presently we implement only F(3x3, 6x6)
 			 */
+			status = nnp_status_unsupported_algorithm;
+			goto cleanup;
+		case nnp_convolution_algorithm_implicit_gemm:
+		case nnp_convolution_algorithm_direct:
 			status = nnp_status_unsupported_algorithm;
 			goto cleanup;
 		case nnp_convolution_algorithm_auto:
@@ -511,7 +520,6 @@ enum nnp_status nnp_convolution_kernel_gradient(
 	}
 
 	switch (algorithm) {
-		case nnp_convolution_algorithm_wt8x8:
 		case nnp_convolution_algorithm_ft8x8:
 		case nnp_convolution_algorithm_ft16x16:
 			if (kernel_size.height > tile_size.height || kernel_size.width > tile_size.width) {
@@ -525,6 +533,8 @@ enum nnp_status nnp_convolution_kernel_gradient(
 				input_transform_function, grad_output_transform_function, grad_kernel_transform_function,
 				threadpool, profile);
 			break;
+		case nnp_convolution_algorithm_wt8x8:
+		case nnp_convolution_algorithm_wt8x8_fp16:
 		case nnp_convolution_algorithm_implicit_gemm:
 		case nnp_convolution_algorithm_direct:
 		case nnp_convolution_algorithm_auto:

@@ -14,6 +14,19 @@ extern unsigned long long median(unsigned long long array[], size_t length);
 extern struct nnp_profile median_profile(struct nnp_profile array[], size_t length);
 extern void read_memory(const void* memory, size_t length);
 
+static void* malloc_with_alignment(size_t size, size_t alignment) {
+	#if defined(__ANDROID__)
+		return memalign(alignment, size);
+	#else
+		void* memory_block = NULL;
+		if (posix_memalign(&memory_block, alignment, size) != 0) {
+			return NULL;
+		}
+
+		return memory_block;
+	#endif
+}
+
 enum mode {
 	mode_output,
 	mode_input_gradient,
@@ -43,7 +56,8 @@ struct nnp_profile benchmark_convolution(
 	struct nnp_profile computation_profile[max_iterations];
 	enum nnp_status status = nnp_status_success;
 	void* memory_block = NULL;
-	size_t memory_size = 0;
+	void* transformed_kernel = NULL;
+	size_t memory_size = 0, transformed_kernel_size = 0;
 	switch (mode) {
 		case mode_output:
 			status = nnp_convolution_output(
@@ -73,6 +87,51 @@ struct nnp_profile benchmark_convolution(
 				threadpool, NULL);
 			break;
 		case mode_inference:
+			if (transform_strategy == nnp_convolution_transform_strategy_precompute) {
+				status = nnp_convolution_inference(
+					algorithm, transform_strategy,
+					input_channels, output_channels,
+					input_size, input_padding, kernel_size, output_subsampling,
+					NULL, NULL, NULL, NULL, NULL, &transformed_kernel_size,
+					nnp_activation_identity, NULL,
+					threadpool, NULL);
+				switch (status) {
+					case nnp_status_success:
+						break;
+					case nnp_status_invalid_algorithm:
+					case nnp_status_unsupported_algorithm:
+						return (struct nnp_profile) { nanf("") };
+						break;
+					case nnp_status_unsupported_transform_strategy:
+						/* Fall back to compute strategy */
+						transform_strategy = nnp_convolution_transform_strategy_compute;
+						break;
+					default:
+						fprintf(stderr, "Error: failed to detect transformed kernel size: status %d\n", status);
+						exit(EXIT_FAILURE);
+				}
+			}
+			if (transform_strategy == nnp_convolution_transform_strategy_precompute) {
+				transformed_kernel = malloc_with_alignment(transformed_kernel_size, 64);
+				if (transformed_kernel == NULL) {
+					fprintf(stderr, "Error: failed to allocate %zu bytes for transformed kernel\n", memory_size);
+					exit(EXIT_FAILURE);
+				}
+
+				status = nnp_convolution_inference(
+					algorithm, transform_strategy,
+					input_channels, output_channels,
+					input_size, input_padding, kernel_size, output_subsampling,
+					NULL, kernel, NULL, NULL, transformed_kernel, &transformed_kernel_size,
+					nnp_activation_identity, NULL,
+					threadpool, NULL);
+				if (status != nnp_status_success) {
+					fprintf(stderr, "Error: failed to pre-compute kernel transform: status %d\n", status);
+					exit(EXIT_FAILURE);
+				}
+				transform_strategy = nnp_convolution_transform_strategy_reuse;
+			}
+
 			status = nnp_convolution_inference(
 				algorithm, transform_strategy,
 				input_channels, output_channels,
@@ -94,8 +153,8 @@ struct nnp_profile benchmark_convolution(
 			exit(EXIT_FAILURE);
 	}
 	if (memory_size != 0) {
-		int allocation_result = posix_memalign(&memory_block, 64, memory_size);
-		if (allocation_result != 0) {
+		memory_block = malloc_with_alignment(memory_size, 64);
+		if (memory_block == NULL) {
 			fprintf(stderr, "Error: failed to allocate %zu bytes for workspace\n", memory_size);
 			exit(EXIT_FAILURE);
 		}
@@ -109,7 +168,8 @@ struct nnp_profile benchmark_convolution(
 					algorithm,
 					batch_size, input_channels, output_channels,
 					input_size, input_padding, kernel_size,
-					input, kernel, bias, output, memory_block, &memory_size,
+					input, kernel, bias, output,
+					memory_block, memory_size == 0 ? NULL : &memory_size,
 					nnp_activation_identity, NULL,
 					threadpool,
 					&computation_profile[iteration]);
@@ -119,7 +179,8 @@ struct nnp_profile benchmark_convolution(
 					algorithm,
 					batch_size, input_channels, output_channels,
 					input_size, input_padding, kernel_size,
-					output, kernel, input, memory_block, &memory_size,
+					output, kernel, input,
+					memory_block, memory_size == 0 ? NULL : &memory_size,
 					nnp_activation_identity, NULL,
 					threadpool,
 					&computation_profile[iteration]);
@@ -129,7 +190,8 @@ struct nnp_profile benchmark_convolution(
 					algorithm,
 					batch_size, input_channels, output_channels,
 					input_size, input_padding, kernel_size,
-					input, output, kernel, memory_block, &memory_size,
+					input, output, kernel,
+					memory_block, memory_size == 0 ? NULL : &memory_size,
 					nnp_activation_identity, NULL,
 					threadpool,
 					&computation_profile[iteration]);
@@ -139,7 +201,8 @@ struct nnp_profile benchmark_convolution(
 					algorithm, transform_strategy,
 					input_channels, output_channels,
 					input_size, input_padding, kernel_size, output_subsampling,
-					input, kernel, bias, output, memory_block, &memory_size,
+					input, transformed_kernel == NULL ? kernel : transformed_kernel, bias, output,
+					memory_block, memory_size == 0 ? NULL : &memory_size,
 					nnp_activation_identity, NULL,
 					threadpool,
 					&computation_profile[iteration]);
@@ -178,9 +241,10 @@ static void print_options_help(const char* program_name) {
 "Optional parameters:\n"
 "  -m   --mode               The convolution mode (output, inference, input-gradient, kernel-gradient)\n"
 "  -a   --algorithm          The algorithm (auto, ft8x8, ft16x16, wt8x8, implicit-gemm, or direct) for computing convolution (default: auto)\n"
+"  -ts  --transform-strategy The transformation strategy (compute, or precompute) for kernel transformation (default: compute)\n"
 "  -b   --batch              The size of a minibatch (default: 1)\n"
-"       --output-subsampling The size of a output subsampling region (default: 1x1)\n"
-"  -ip  --padding            Implicit input padding (default: 0)\n"
+"  -s   --output-subsampling The size of a output subsampling region, AKA stride (default: 1x1)\n"
+"  -ip  --input-padding      Implicit input padding (default: 0)\n"
 "  -t   --threads            The number of threads (default: all; 0 to disable threadpool)\n"
 "  -i   --iterations         # iterations (default: 3)\n",
 		program_name);
@@ -188,7 +252,7 @@ static void print_options_help(const char* program_name) {
 
 static struct options parse_options(int argc, char** argv) {
 	struct options options = {
-		.mode = mode_output,
+		.mode = mode_inference,
 		.batch_size = 1,
 		.input_channels = 0,
 		.output_channels = 0,
@@ -259,11 +323,11 @@ static struct options parse_options(int argc, char** argv) {
 				exit(EXIT_FAILURE);
 			}
 			if (sscanf(argv[argi + 2], "%zu", &options.input_size.width) != 1) {
-				fprintf(stderr, "Error: can not parse %s as an unsigned integer\n", argv[argi + 1]);
+				fprintf(stderr, "Error: can not parse %s as an unsigned integer\n", argv[argi + 2]);
 				exit(EXIT_FAILURE);
 			}
 			if (options.input_size.width == 0) {
-				fprintf(stderr, "Error: invalid value %s for the input width: positive value expected\n", argv[argi + 1]);
+				fprintf(stderr, "Error: invalid value %s for the input width: positive value expected\n", argv[argi + 2]);
 				exit(EXIT_FAILURE);
 			}
 			argi += 2;
@@ -281,11 +345,11 @@ static struct options parse_options(int argc, char** argv) {
 				exit(EXIT_FAILURE);
 			}
 			if (sscanf(argv[argi + 2], "%zu", &options.kernel_size.width) != 1) {
-				fprintf(stderr, "Error: can not parse %s as an unsigned integer\n", argv[argi + 1]);
+				fprintf(stderr, "Error: can not parse %s as an unsigned integer\n", argv[argi + 2]);
 				exit(EXIT_FAILURE);
 			}
 			if (options.kernel_size.width == 0) {
-				fprintf(stderr, "Error: invalid value %s for the kernel width: positive value expected\n", argv[argi + 1]);
+				fprintf(stderr, "Error: invalid value %s for the kernel width: positive value expected\n", argv[argi + 2]);
 				exit(EXIT_FAILURE);
 			}
 			argi += 2;
@@ -299,7 +363,7 @@ static struct options parse_options(int argc, char** argv) {
 				exit(EXIT_FAILURE);
 			}
 			argi += 1;
-		} else if (strcmp(argv[argi], "--output-subsampling") == 0) {
+		} else if ((strcmp(argv[argi], "--output-subsampling") == 0) || (strcmp(argv[argi], "-s") == 0)) {
 			if (argc - argi < 2) {
 				fprintf(stderr, "Error: expected two output subsampling values\n");
 				exit(EXIT_FAILURE);
@@ -313,11 +377,11 @@ static struct options parse_options(int argc, char** argv) {
 				exit(EXIT_FAILURE);
 			}
 			if (sscanf(argv[argi + 2], "%zu", &options.output_subsampling.width) != 1) {
-				fprintf(stderr, "Error: can not parse %s as an unsigned integer\n", argv[argi + 1]);
+				fprintf(stderr, "Error: can not parse %s as an unsigned integer\n", argv[argi + 2]);
 				exit(EXIT_FAILURE);
 			}
 			if (options.output_subsampling.width == 0) {
-				fprintf(stderr, "Error: invalid value %s for the output subsampling width: positive value expected\n", argv[argi + 1]);
+				fprintf(stderr, "Error: invalid value %s for the output subsampling width: positive value expected\n", argv[argi + 2]);
 				exit(EXIT_FAILURE);
 			}
 			argi += 2;
@@ -340,6 +404,20 @@ static struct options parse_options(int argc, char** argv) {
 				options.algorithm = nnp_convolution_algorithm_direct;
 			} else {
 				fprintf(stderr, "Error: invalid convolution algorithm name %s\n", argv[argi + 1]);
+				exit(EXIT_FAILURE);
+			}
+			argi += 1;
+		} else if ((strcmp(argv[argi], "--transform-strategy") == 0) || (strcmp(argv[argi], "-ts") == 0)) {
+			if (argi + 1 == argc) {
+				fprintf(stderr, "Error: expected transformation strategy name\n");
+				exit(EXIT_FAILURE);
+			}
+			if (strcmp(argv[argi + 1], "compute") == 0) {
+				options.transform_strategy = nnp_convolution_transform_strategy_compute;
+			} else if (strcmp(argv[argi + 1], "precompute") == 0) {
+				options.transform_strategy = nnp_convolution_transform_strategy_precompute;
+			} else {
+				fprintf(stderr, "Error: invalid trasnformation strategy name %s\n", argv[argi + 1]);
 				exit(EXIT_FAILURE);
 			}
 			argi += 1;
@@ -397,8 +475,12 @@ static struct options parse_options(int argc, char** argv) {
 			exit(EXIT_FAILURE);
 		}
 	}
-	if ((options.mode == mode_inference) && (options.batch_size != 1)) {
+	if (options.mode == mode_inference && options.batch_size != 1) {
 		fprintf(stderr, "Error: inference requires unit batch size\n");
+		exit(EXIT_FAILURE);
+	}
+	if (options.transform_strategy == nnp_convolution_transform_strategy_precompute && options.mode != mode_inference) {
+		fprintf(stderr, "Error: \"precompute\" transform strategy requires inference mode\n");
 		exit(EXIT_FAILURE);
 	}
 	if (options.input_channels == 0) {
@@ -474,6 +556,11 @@ int main(int argc, char** argv) {
 			flops_per_element = 2.0;
 			printf("Algorithm: WT8x8\n");
 			break;
+		case nnp_convolution_algorithm_wt8x8_fp16:
+			tile_size = (struct nnp_size) { 8, 8 };
+			flops_per_element = 2.0;
+			printf("Algorithm: WT8x8 (FP16)\n");
+			break;
 		case nnp_convolution_algorithm_implicit_gemm:
 			tile_size = (struct nnp_size) { 1, 1 };
 			flops_per_element = 2.0 * kernel_size.height * kernel_size.width;
@@ -493,13 +580,16 @@ int main(int argc, char** argv) {
 		(output_size.height / output_tile_size.height + !!(output_size.height % output_tile_size.height)) *
 		(output_size.width / output_tile_size.width + !!(output_size.width % output_tile_size.width));
 
-	const size_t cache_size = 128 * 1024 * 1024;
-	void* memory = NULL;
-	if (posix_memalign(&memory, 64, cache_size) != 0) {
+	#ifdef __ANDROID__
+		const size_t cache_size = 4 * 1024 * 1024;
+	#else
+		const size_t cache_size = 128 * 1024 * 1024;
+	#endif
+	void* memory = malloc_with_alignment(cache_size, 64);
+	if (memory == NULL) {
 		fprintf(stderr, "Error: failed to allocate memory for cache flushing buffer\n");
 		exit(EXIT_FAILURE);
 	}
-
 	void* input = malloc(batch_size * input_channels * input_size.width * input_size.height * sizeof(float));
 	void* kernel = malloc(input_channels * output_channels * kernel_size.width * kernel_size.height * sizeof(float));
 	void* output = malloc(batch_size * output_channels * output_size.width * output_size.height * sizeof(float));

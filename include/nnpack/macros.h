@@ -50,3 +50,17 @@
 #define NNP_CACHE_ALIGN NNP_ALIGN(64)
 
 #define NNP_COUNT_OF(array) (sizeof(array) / sizeof(0[array]))
+
+#if defined(__GNUC__)
+	#define NNP_LIKELY(condition) (__builtin_expect(!!(condition), 1))
+	#define NNP_UNLIKELY(condition) (__builtin_expect(!!(condition), 0))
+#else
+	#define NNP_LIKELY(condition) (!!(condition))
+	#define NNP_UNLIKELY(condition) (!!(condition))
+#endif
+
+#if defined(__GNUC__)
+	#define NNP_INLINE inline __attribute__((__always_inline__))
+#else
+	#define NNP_INLINE inline
+#endif
