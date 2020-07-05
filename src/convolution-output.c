@@ -198,7 +198,7 @@ static void compute_matrix_multiplication(
 		(output_channels_block_start * batch_block_size * tuple_elements);
 
 	if (batch_subblock_size == batch_subblock_max) {
-		const nnp_fast_sgemm_function fast_gemm = context->fast_gemm;
+		const nnp_fast_tuple_gemm_function fast_gemm = context->fast_gemm;
 		while (output_channels_block_size >= output_channels_subblock_max) {
 			output_channels_block_size -= output_channels_subblock_max;
 
@@ -214,7 +214,7 @@ static void compute_matrix_multiplication(
 		}
 	}
 
-	const nnp_full_sgemm_function full_gemm = context->full_gemm;
+	const nnp_full_tuple_gemm_function full_gemm = context->full_gemm;
 	while (output_channels_block_size != 0) {
 		const size_t output_channels_subblock_size = min(output_channels_block_size, output_channels_subblock_max);
 		output_channels_block_size -= output_channels_subblock_size;
@@ -318,11 +318,12 @@ static enum nnp_status compute_fast_convolution_output(
 		.input_channels_block_max = input_channels_block_max,
 		.kernel_size = kernel_size,
 	};
-	pthreadpool_compute_2d_tiled(threadpool,
-		(pthreadpool_function_2d_tiled_t) compute_kernel_transform,
+	pthreadpool_parallelize_2d_tile_2d(threadpool,
+		(pthreadpool_task_2d_tile_2d_t) compute_kernel_transform,
 		&kernel_transform_context,
 		input_channels, output_channels,
-		1,              output_channels_subblock_max);
+		1,              output_channels_subblock_max,
+		PTHREADPOOL_FLAG_DISABLE_DENORMALS);
 	NNP_KERNEL_TRANSFORM_END(profile)
 
 	for (size_t y = 0; y < output_size.height; y += output_tile_size.height) {
@@ -347,11 +348,12 @@ static enum nnp_status compute_fast_convolution_output(
 				.column_count = min(input_size.width - input_x,
 					tile_size.width - input_transform_context.column_offset),
 			};
-			pthreadpool_compute_2d_tiled(threadpool,
-				(pthreadpool_function_2d_tiled_t) compute_input_transform,
+			pthreadpool_parallelize_2d_tile_2d(threadpool,
+				(pthreadpool_task_2d_tile_2d_t) compute_input_transform,
 				&input_transform_context,
 				input_channels, batch_size,
-				1, batch_subblock_max);
+				1, batch_subblock_max,
+				PTHREADPOOL_FLAG_DISABLE_DENORMALS);
 			NNP_INPUT_TRANSFORM_END(profile)
 
 			NNP_BLOCK_MULTIPLICATION_START(profile)
@@ -389,11 +391,12 @@ static enum nnp_status compute_fast_convolution_output(
 							matrix_multiplication_context.fast_gemm = nnp_hwinfo.sxgemm.only_mr_x_nr;
 							matrix_multiplication_context.full_gemm = nnp_hwinfo.sxgemm.upto_mr_x_nr;
 						}
-						pthreadpool_compute_2d_tiled(threadpool,
-							(pthreadpool_function_2d_tiled_t) compute_matrix_multiplication,
+						pthreadpool_parallelize_2d_tile_2d(threadpool,
+							(pthreadpool_task_2d_tile_2d_t) compute_matrix_multiplication,
 							&matrix_multiplication_context,
 							output_channels,           batch_block_size,
-							output_channels_block_max, batch_subblock_max);
+							output_channels_block_max, batch_subblock_max,
+							PTHREADPOOL_FLAG_DISABLE_DENORMALS);
 					}
 				}
 			}
@@ -413,11 +416,12 @@ static enum nnp_status compute_fast_convolution_output(
 				.row_count = min(output_tile_size.height, output_size.height - y),
 				.column_count = min(output_tile_size.width, output_size.width - x),
 			};
-			pthreadpool_compute_2d_tiled(threadpool,
-				(pthreadpool_function_2d_tiled_t) compute_output_transform,
+			pthreadpool_parallelize_2d_tile_2d(threadpool,
+				(pthreadpool_task_2d_tile_2d_t) compute_output_transform,
 				&output_transform_context,
 				batch_size, output_channels,
-				1,          output_channels_subblock_max);
+				1,          output_channels_subblock_max,
+				PTHREADPOOL_FLAG_DISABLE_DENORMALS);
 			NNP_OUTPUT_TRANSFORM_END(profile)
 		}
 	}
@@ -532,6 +536,7 @@ enum nnp_status nnp_convolution_output(
 			fourier_transform = true;
 			break;
 		case nnp_convolution_algorithm_wt8x8:
+		case nnp_convolution_algorithm_wt8x8_fp16:
 			if ((kernel_size.height != 3) || (kernel_size.width != 3)) {
 				status = nnp_status_unsupported_algorithm;
 				goto cleanup;
@@ -552,6 +557,10 @@ enum nnp_status nnp_convolution_output(
 			tile_size = (struct nnp_size) { .height = 8, .width = 8 };
 			fourier_transform = false;
 			break;
+		case nnp_convolution_algorithm_implicit_gemm:
+		case nnp_convolution_algorithm_direct:
+			status = nnp_status_unsupported_algorithm;
+			goto cleanup;
 		case nnp_convolution_algorithm_auto:
 			NNP_UNREACHABLE;
 		default:
@@ -561,6 +570,7 @@ enum nnp_status nnp_convolution_output(
 
 	switch (algorithm) {
 		case nnp_convolution_algorithm_wt8x8:
+		case nnp_convolution_algorithm_wt8x8_fp16:
 		case nnp_convolution_algorithm_ft8x8:
 		case nnp_convolution_algorithm_ft16x16:
 			if (kernel_size.height > tile_size.height || kernel_size.width > tile_size.width) {

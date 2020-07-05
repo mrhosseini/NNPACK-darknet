@@ -112,6 +112,12 @@ enum nnp_convolution_algorithm {
 	nnp_convolution_algorithm_implicit_gemm = 4,
 	/** Direct convolution implementation. */
 	nnp_convolution_algorithm_direct = 5,
+	/**
+	 * Tiled convolution based on 2D Winograd transform F(3x3, 6x6) with 8x8 blocks in FP16.
+	 * Supports only 3x3 kernels. Implemented only for new ARM processors (with NEON-HP),
+	 * on non-supported processors falls back to nnp_convolution_algorithm_wt8x8.
+	 */
+	nnp_convolution_algorithm_wt8x8_fp16 = 6,
 };
 
 enum nnp_convolution_transform_strategy {
@@ -474,10 +480,10 @@ enum nnp_status nnp_fully_connected_inference_f16f32(
  * @param[out] output A 4D tensor output[batch_size][channels][output_size.height][output_size.width] where
  *                    output_size.height = ceil(
  *                      (input_padding.top + input_size.height + input_padding.bottom - pooling_size.height) /
- *                        pooling_stride.height)
+ *                        pooling_stride.height) + 1
  *                    output_size.width = ceil(
  *                      (input_padding.left + input_size.width + input_padding.right - pooling_size.width) /
- *                        pooling_stride.width)
+ *                        pooling_stride.width) + 1
  * @param threadpool A thread pool for parallelization of the computation.
  *                   If threadpool is NULL, the computation would run on the caller thread without parallelization.
  */
