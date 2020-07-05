@@ -1,3 +1,5 @@
+This repository is a clone of [digitalbrain79/NNPACK-darknet](https://github.com/digitalbrain79/NNPACK-darknet) merged with latest changes of the original repository [Maratyszcza/NNPACK](https://github.com/Maratyszcza/NNPACK).
+
 <p align="center"><img src="https://maratyszcza.github.io/NNPACK/NNPACK.png" alt="NNPACK Logo" title="NNPACK"/></p>
 
 # NNPACK
